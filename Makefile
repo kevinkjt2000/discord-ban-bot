@@ -1,8 +1,11 @@
-.PHONY: build test run clean
+.PHONY: build test run clean install
 
 BINARY := ban-bot
+SOURCES := $(wildcard *.go)
 
-build:
+build: $(BINARY)
+
+$(BINARY): $(SOURCES) go.mod go.sum
 	go build -o $(BINARY) .
 
 test:
@@ -13,3 +16,6 @@ run: build
 
 clean:
 	rm -f $(BINARY)
+
+install: build
+	sudo ./install.sh

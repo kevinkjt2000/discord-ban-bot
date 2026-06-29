@@ -13,6 +13,11 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
+type discordSession interface {
+	GuildBanCreateWithReason(guildID, userID, reason string, days int, options ...discordgo.RequestOption) error
+	ChannelMessageDelete(channelID, messageID string, options ...discordgo.RequestOption) error
+}
+
 type cachedMessage struct {
 	messageID string
 	channelID string
@@ -20,9 +25,9 @@ type cachedMessage struct {
 }
 
 type messageCache struct {
-	mu       sync.RWMutex
-	messages map[string][]cachedMessage
-	ttl      time.Duration
+	mu         sync.RWMutex
+	messages   map[string][]cachedMessage
+	ttl        time.Duration
 	maxPerUser int
 }
 
@@ -108,7 +113,7 @@ func shouldBan(honeypotID string, m *discordgo.MessageCreate) bool {
 	return true
 }
 
-func handleMessage(s *discordgo.Session, honeypotID string, cache *messageCache, m *discordgo.MessageCreate) {
+func handleMessage(s discordSession, honeypotID string, cache *messageCache, m *discordgo.MessageCreate) {
 	if m.Author != nil && !m.Author.Bot {
 		cache.add(m.Author.ID, m.ID, m.ChannelID)
 	}
@@ -140,9 +145,6 @@ func handleMessage(s *discordgo.Session, honeypotID string, cache *messageCache,
 
 	log.Printf("purging %d cached message(s) from user %s", len(msgs), m.Author.ID)
 	for _, msg := range msgs {
-		if msg.channelID == honeypotID {
-			continue
-		}
 		err := s.ChannelMessageDelete(msg.channelID, msg.messageID)
 		if err != nil {
 			if restErr, ok := err.(*discordgo.RESTError); ok && restErr.Message != nil {

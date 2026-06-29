@@ -7,6 +7,94 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
+type mockSession struct {
+	bannedUserID string
+	deletedMsgs  []struct{ channelID, messageID string }
+	banErr       error
+	deleteErrs   map[string]error
+}
+
+func (m *mockSession) GuildBanCreateWithReason(guildID, userID, reason string, days int, options ...discordgo.RequestOption) error {
+	m.bannedUserID = userID
+	return m.banErr
+}
+
+func (m *mockSession) ChannelMessageDelete(channelID, messageID string, options ...discordgo.RequestOption) error {
+	m.deletedMsgs = append(m.deletedMsgs, struct{ channelID, messageID string }{channelID, messageID})
+	if m.deleteErrs != nil {
+		if err, ok := m.deleteErrs[messageID]; ok {
+			return err
+		}
+	}
+	return nil
+}
+
+func TestHandleMessage_DeletesHoneypotMessage(t *testing.T) {
+	cache := newMessageCache(5*time.Second, 100)
+	honeypotID := "honeypot-channel"
+	userID := "user123"
+	msgHoneypot1 := "msg-honeypot-1"
+	msgHoneypot2 := "msg-honeypot-2"
+	msgOther := "msg-other"
+	otherChannel := "other-channel"
+	guildID := "guild123"
+
+	// Seed cache with two messages: one older honeypot message and one other channel message
+	cache.add(userID, msgHoneypot1, honeypotID)
+	cache.add(userID, msgOther, otherChannel)
+
+	mock := &mockSession{}
+
+	// Trigger with a NEW honeypot message (different ID from the seeded one)
+	trigger := &discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ID:        msgHoneypot2,
+			ChannelID: honeypotID,
+			GuildID:   guildID,
+			Author: &discordgo.User{
+				ID:       userID,
+				Username: "testuser",
+				Bot:      false,
+			},
+		},
+	}
+
+	handleMessage(mock, honeypotID, cache, trigger)
+
+	if mock.bannedUserID != userID {
+		t.Fatalf("expected user %s to be banned, got %s", userID, mock.bannedUserID)
+	}
+
+	// Should have 3 deleted messages: the 2 seeded + the trigger
+	if len(mock.deletedMsgs) != 3 {
+		t.Fatalf("expected 3 deleted messages, got %d: %+v", len(mock.deletedMsgs), mock.deletedMsgs)
+	}
+
+	foundHoneypot1 := false
+	foundHoneypot2 := false
+	foundOther := false
+	for _, dm := range mock.deletedMsgs {
+		if dm.messageID == msgHoneypot1 && dm.channelID == honeypotID {
+			foundHoneypot1 = true
+		}
+		if dm.messageID == msgHoneypot2 && dm.channelID == honeypotID {
+			foundHoneypot2 = true
+		}
+		if dm.messageID == msgOther && dm.channelID == otherChannel {
+			foundOther = true
+		}
+	}
+	if !foundHoneypot1 {
+		t.Errorf("expected seeded honeypot message %s to be deleted", msgHoneypot1)
+	}
+	if !foundHoneypot2 {
+		t.Errorf("expected trigger honeypot message %s to be deleted", msgHoneypot2)
+	}
+	if !foundOther {
+		t.Errorf("expected other message %s to be deleted", msgOther)
+	}
+}
+
 func TestShouldBan_WrongChannel(t *testing.T) {
 	msg := &discordgo.MessageCreate{
 		Message: &discordgo.Message{

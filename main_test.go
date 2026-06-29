@@ -76,7 +76,7 @@ func TestShouldBan_EmptyHoneypot(t *testing.T) {
 }
 
 func TestMessageCache_AddAndPurge(t *testing.T) {
-	cache := newMessageCache(5 * time.Second)
+	cache := newMessageCache(5*time.Second, 100)
 	cache.add("user1", "msg1", "ch1")
 	cache.add("user1", "msg2", "ch2")
 	cache.add("user2", "msg3", "ch3")
@@ -101,7 +101,7 @@ func TestMessageCache_AddAndPurge(t *testing.T) {
 }
 
 func TestMessageCache_PurgeExpired(t *testing.T) {
-	cache := newMessageCache(50 * time.Millisecond)
+	cache := newMessageCache(50*time.Millisecond, 100)
 	cache.add("user1", "msg1", "ch1")
 	time.Sleep(100 * time.Millisecond)
 
@@ -112,7 +112,7 @@ func TestMessageCache_PurgeExpired(t *testing.T) {
 }
 
 func TestMessageCache_Cleanup(t *testing.T) {
-	cache := newMessageCache(50 * time.Millisecond)
+	cache := newMessageCache(50*time.Millisecond, 100)
 	cache.add("user1", "msg1", "ch1")
 	cache.add("user2", "msg2", "ch2")
 	time.Sleep(100 * time.Millisecond)
@@ -127,7 +127,7 @@ func TestMessageCache_Cleanup(t *testing.T) {
 }
 
 func TestMessageCache_CleanupPartial(t *testing.T) {
-	cache := newMessageCache(50 * time.Millisecond)
+	cache := newMessageCache(50*time.Millisecond, 100)
 	cache.add("user1", "msg1", "ch1")
 	time.Sleep(60 * time.Millisecond)
 	cache.add("user1", "msg2", "ch2")
@@ -145,5 +145,27 @@ func TestMessageCache_CleanupPartial(t *testing.T) {
 	}
 	if msgs[0].messageID != "msg2" {
 		t.Fatalf("expected msg2 to remain, got %s", msgs[0].messageID)
+	}
+}
+
+func TestMessageCache_MaxPerUser(t *testing.T) {
+	cache := newMessageCache(5*time.Second, 3)
+	cache.add("user1", "msg1", "ch1")
+	cache.add("user1", "msg2", "ch2")
+	cache.add("user1", "msg3", "ch3")
+	cache.add("user1", "msg4", "ch4")
+	cache.add("user1", "msg5", "ch5")
+
+	cache.mu.RLock()
+	msgs := cache.messages["user1"]
+	cache.mu.RUnlock()
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages after cap, got %d", len(msgs))
+	}
+	if msgs[0].messageID != "msg3" {
+		t.Fatalf("expected oldest kept to be msg3, got %s", msgs[0].messageID)
+	}
+	if msgs[2].messageID != "msg5" {
+		t.Fatalf("expected newest to be msg5, got %s", msgs[2].messageID)
 	}
 }

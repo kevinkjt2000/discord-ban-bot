@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,12 +23,17 @@ type messageCache struct {
 	mu       sync.RWMutex
 	messages map[string][]cachedMessage
 	ttl      time.Duration
+	maxPerUser int
 }
 
-func newMessageCache(ttl time.Duration) *messageCache {
+func newMessageCache(ttl time.Duration, maxPerUser int) *messageCache {
+	if maxPerUser <= 0 {
+		maxPerUser = 100
+	}
 	return &messageCache{
-		messages: make(map[string][]cachedMessage),
-		ttl:      ttl,
+		messages:   make(map[string][]cachedMessage),
+		ttl:        ttl,
+		maxPerUser: maxPerUser,
 	}
 }
 
@@ -39,6 +45,9 @@ func (c *messageCache) add(userID, messageID, channelID string) {
 		channelID: channelID,
 		timestamp: time.Now(),
 	})
+	if len(c.messages[userID]) > c.maxPerUser {
+		c.messages[userID] = c.messages[userID][len(c.messages[userID])-c.maxPerUser:]
+	}
 }
 
 func (c *messageCache) purge(userID string) []cachedMessage {
@@ -66,6 +75,7 @@ func (c *messageCache) cleanup() {
 	defer c.mu.Unlock()
 
 	now := time.Now()
+	prunedUsers := 0
 	for userID, msgs := range c.messages {
 		var valid []cachedMessage
 		for _, m := range msgs {
@@ -75,9 +85,13 @@ func (c *messageCache) cleanup() {
 		}
 		if len(valid) == 0 {
 			delete(c.messages, userID)
+			prunedUsers++
 		} else {
 			c.messages[userID] = valid
 		}
+	}
+	if prunedUsers > 0 {
+		log.Printf("cache cleanup: pruned %d user(s), %d user(s) remain", prunedUsers, len(c.messages))
 	}
 }
 
@@ -164,7 +178,16 @@ func main() {
 		}
 	}
 
-	cache := newMessageCache(ttl)
+	maxPerUser := 100
+	if v := os.Getenv("CACHE_MAX_PER_USER"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxPerUser = n
+		} else {
+			log.Printf("invalid CACHE_MAX_PER_USER, using default 100: %v", err)
+		}
+	}
+
+	cache := newMessageCache(ttl, maxPerUser)
 
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)

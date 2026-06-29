@@ -1,0 +1,9 @@
+/ban-bot
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+.env

@@ -1,4 +1,4 @@
-.PHONY: build test run clean install
+.PHONY: build test run clean install logs
 
 BINARY := ban-bot
 SOURCES := $(wildcard *.go)
@@ -19,3 +19,6 @@ clean:
 
 install: build
 	sudo ./install.sh
+
+logs:
+	sudo journalctl -u ban-bot -f

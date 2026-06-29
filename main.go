@@ -5,10 +5,81 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
+
+type cachedMessage struct {
+	messageID string
+	channelID string
+	timestamp time.Time
+}
+
+type messageCache struct {
+	mu       sync.RWMutex
+	messages map[string][]cachedMessage
+	ttl      time.Duration
+}
+
+func newMessageCache(ttl time.Duration) *messageCache {
+	return &messageCache{
+		messages: make(map[string][]cachedMessage),
+		ttl:      ttl,
+	}
+}
+
+func (c *messageCache) add(userID, messageID, channelID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.messages[userID] = append(c.messages[userID], cachedMessage{
+		messageID: messageID,
+		channelID: channelID,
+		timestamp: time.Now(),
+	})
+}
+
+func (c *messageCache) purge(userID string) []cachedMessage {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	msgs, ok := c.messages[userID]
+	if !ok {
+		return nil
+	}
+	delete(c.messages, userID)
+
+	now := time.Now()
+	var valid []cachedMessage
+	for _, m := range msgs {
+		if now.Sub(m.timestamp) <= c.ttl {
+			valid = append(valid, m)
+		}
+	}
+	return valid
+}
+
+func (c *messageCache) cleanup() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	now := time.Now()
+	for userID, msgs := range c.messages {
+		var valid []cachedMessage
+		for _, m := range msgs {
+			if now.Sub(m.timestamp) <= c.ttl {
+				valid = append(valid, m)
+			}
+		}
+		if len(valid) == 0 {
+			delete(c.messages, userID)
+		} else {
+			c.messages[userID] = valid
+		}
+	}
+}
 
 func shouldBan(honeypotID string, m *discordgo.MessageCreate) bool {
 	if honeypotID == "" {
@@ -23,7 +94,11 @@ func shouldBan(honeypotID string, m *discordgo.MessageCreate) bool {
 	return true
 }
 
-func handleMessage(s *discordgo.Session, honeypotID string, m *discordgo.MessageCreate) {
+func handleMessage(s *discordgo.Session, honeypotID string, cache *messageCache, m *discordgo.MessageCreate) {
+	if m.Author != nil && !m.Author.Bot {
+		cache.add(m.Author.ID, m.ID, m.ChannelID)
+	}
+
 	if !shouldBan(honeypotID, m) {
 		return
 	}
@@ -43,6 +118,30 @@ func handleMessage(s *discordgo.Session, honeypotID string, m *discordgo.Message
 	}
 
 	log.Printf("banned user %s (%s)", m.Author.Username, m.Author.ID)
+
+	msgs := cache.purge(m.Author.ID)
+	if len(msgs) == 0 {
+		return
+	}
+
+	log.Printf("purging %d cached message(s) from user %s", len(msgs), m.Author.ID)
+	for _, msg := range msgs {
+		if msg.channelID == honeypotID {
+			continue
+		}
+		err := s.ChannelMessageDelete(msg.channelID, msg.messageID)
+		if err != nil {
+			if restErr, ok := err.(*discordgo.RESTError); ok && restErr.Message != nil {
+				log.Printf("delete failed for message %s in channel %s: discord API error %d: %s",
+					msg.messageID, msg.channelID, restErr.Response.StatusCode, restErr.Message.Message)
+			} else {
+				log.Printf("delete failed for message %s in channel %s: %v",
+					msg.messageID, msg.channelID, err)
+			}
+			continue
+		}
+		log.Printf("deleted message %s from channel %s", msg.messageID, msg.channelID)
+	}
 }
 
 func main() {
@@ -56,13 +155,32 @@ func main() {
 		log.Fatal("HONEYPOT_CHANNEL_ID environment variable is required")
 	}
 
+	ttl := 60 * time.Second
+	if v := os.Getenv("CACHE_TTL_SECONDS"); v != "" {
+		if d, err := time.ParseDuration(v + "s"); err == nil {
+			ttl = d
+		} else {
+			log.Printf("invalid CACHE_TTL_SECONDS, using default 60s: %v", err)
+		}
+	}
+
+	cache := newMessageCache(ttl)
+
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			cache.cleanup()
+		}
+	}()
+
 	dg, err := discordgo.New("Bot " + token)
 	if err != nil {
 		log.Fatalf("failed to create discord session: %v", err)
 	}
 
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
-		handleMessage(s, honeypotID, m)
+		handleMessage(s, honeypotID, cache, m)
 	})
 
 	dg.Identify.Intents = discordgo.IntentsGuildMessages
@@ -97,7 +215,7 @@ func main() {
 	}
 	defer dg.Close()
 
-	log.Printf("ban-bot connected. monitoring honeypot channel %s", honeypotID)
+	log.Printf("ban-bot connected. monitoring honeypot channel %s (cache_ttl=%s)", honeypotID, ttl)
 
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)

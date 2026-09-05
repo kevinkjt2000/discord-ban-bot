@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -31,6 +32,7 @@ func (m *mockSession) ChannelMessageDelete(channelID, messageID string, options 
 
 func TestHandleMessage_DeletesHoneypotMessage(t *testing.T) {
 	cache := newMessageCache(5*time.Second, 100)
+	spamCache := newSpamCache(5 * time.Second)
 	honeypotID := "honeypot-channel"
 	userID := "user123"
 	msgHoneypot1 := "msg-honeypot-1"
@@ -59,7 +61,7 @@ func TestHandleMessage_DeletesHoneypotMessage(t *testing.T) {
 		},
 	}
 
-	handleMessage(mock, honeypotID, cache, trigger)
+	handleMessage(mock, honeypotID, cache, spamCache, trigger)
 
 	if mock.bannedUserID != userID {
 		t.Fatalf("expected user %s to be banned, got %s", userID, mock.bannedUserID)
@@ -95,7 +97,7 @@ func TestHandleMessage_DeletesHoneypotMessage(t *testing.T) {
 	}
 }
 
-func TestShouldBan_WrongChannel(t *testing.T) {
+func TestShouldBanHoneypot_WrongChannel(t *testing.T) {
 	msg := &discordgo.MessageCreate{
 		Message: &discordgo.Message{
 			ChannelID: "other-channel",
@@ -107,12 +109,12 @@ func TestShouldBan_WrongChannel(t *testing.T) {
 		},
 	}
 
-	if shouldBan("honeypot", msg) {
-		t.Error("expected shouldBan to be false for wrong channel")
+	if shouldBanHoneypot("honeypot", msg) {
+		t.Error("expected shouldBanHoneypot to be false for wrong channel")
 	}
 }
 
-func TestShouldBan_BotUser(t *testing.T) {
+func TestShouldBanHoneypot_BotUser(t *testing.T) {
 	msg := &discordgo.MessageCreate{
 		Message: &discordgo.Message{
 			ChannelID: "honeypot",
@@ -124,12 +126,12 @@ func TestShouldBan_BotUser(t *testing.T) {
 		},
 	}
 
-	if shouldBan("honeypot", msg) {
-		t.Error("expected shouldBan to be false for bot user")
+	if shouldBanHoneypot("honeypot", msg) {
+		t.Error("expected shouldBanHoneypot to be false for bot user")
 	}
 }
 
-func TestShouldBan_ValidUser(t *testing.T) {
+func TestShouldBanHoneypot_ValidUser(t *testing.T) {
 	msg := &discordgo.MessageCreate{
 		Message: &discordgo.Message{
 			ChannelID: "honeypot",
@@ -141,12 +143,12 @@ func TestShouldBan_ValidUser(t *testing.T) {
 		},
 	}
 
-	if !shouldBan("honeypot", msg) {
-		t.Error("expected shouldBan to be true for valid user in honeypot channel")
+	if !shouldBanHoneypot("honeypot", msg) {
+		t.Error("expected shouldBanHoneypot to be true for valid user in honeypot channel")
 	}
 }
 
-func TestShouldBan_EmptyHoneypot(t *testing.T) {
+func TestShouldBanHoneypot_EmptyHoneypot(t *testing.T) {
 	msg := &discordgo.MessageCreate{
 		Message: &discordgo.Message{
 			ChannelID: "",
@@ -158,8 +160,8 @@ func TestShouldBan_EmptyHoneypot(t *testing.T) {
 		},
 	}
 
-	if shouldBan("", msg) {
-		t.Error("expected shouldBan to be false when honeypot ID is empty")
+	if shouldBanHoneypot("", msg) {
+		t.Error("expected shouldBanHoneypot to be false when honeypot ID is empty")
 	}
 }
 
@@ -255,5 +257,200 @@ func TestMessageCache_MaxPerUser(t *testing.T) {
 	}
 	if msgs[2].messageID != "msg5" {
 		t.Fatalf("expected newest to be msg5, got %s", msgs[2].messageID)
+	}
+}
+
+func TestSpamCache_Check_NotSpam(t *testing.T) {
+	sc := newSpamCache(5 * time.Second)
+	sc.add("user1", "msg1", "ch1", "hello world")
+	sc.add("user1", "msg2", "ch2", "hello world")
+
+	msgs, isSpam := sc.check("user1", "hello world")
+	if isSpam {
+		t.Fatal("expected not spam with only 2 channels")
+	}
+	if msgs != nil {
+		t.Fatalf("expected nil msgs, got %d", len(msgs))
+	}
+}
+
+func TestSpamCache_Check_Spam(t *testing.T) {
+	sc := newSpamCache(5 * time.Second)
+	sc.add("user1", "msg1", "ch1", "spam content")
+	sc.add("user1", "msg2", "ch2", "spam content")
+
+	// The third message in a third channel should trigger
+	sc.add("user1", "msg3", "ch3", "spam content")
+
+	msgs, isSpam := sc.check("user1", "spam content")
+	if !isSpam {
+		t.Fatal("expected spam with 3 channels")
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 spam entries, got %d", len(msgs))
+	}
+}
+
+func TestSpamCache_Check_DifferentUsers(t *testing.T) {
+	sc := newSpamCache(5 * time.Second)
+	sc.add("user1", "msg1", "ch1", "same text")
+	sc.add("user2", "msg2", "ch2", "same text")
+	sc.add("user2", "msg3", "ch3", "same text")
+
+	msgs, isSpam := sc.check("user1", "same text")
+	if isSpam {
+		t.Fatal("expected user1 not spam")
+	}
+	if msgs != nil {
+		t.Fatalf("expected nil msgs for user1, got %d", len(msgs))
+	}
+}
+
+func TestSpamCache_Cleanup(t *testing.T) {
+	sc := newSpamCache(50 * time.Millisecond)
+	sc.add("user1", "msg1", "ch1", "test")
+	time.Sleep(100 * time.Millisecond)
+
+	sc.cleanup()
+
+	sc.mu.RLock()
+	if len(sc.entries) != 0 {
+		t.Fatalf("expected empty spam cache after cleanup, got %d entries", len(sc.entries))
+	}
+	sc.mu.RUnlock()
+}
+
+func TestSpamCache_CleanupPartial(t *testing.T) {
+	sc := newSpamCache(50 * time.Millisecond)
+	sc.add("user1", "msg1", "ch1", "test")
+	time.Sleep(60 * time.Millisecond)
+	sc.add("user1", "msg2", "ch2", "test")
+
+	sc.cleanup()
+
+	sc.mu.RLock()
+	users, ok := sc.entries[hashMessage("test")]
+	sc.mu.RUnlock()
+	if !ok {
+		t.Fatal("expected hash to still be in cache")
+	}
+	entries, ok := users["user1"]
+	if !ok {
+		t.Fatal("expected user1 to still be in cache")
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 valid entry after cleanup, got %d", len(entries))
+	}
+	if entries[0].messageID != "msg2" {
+		t.Fatalf("expected msg2 to remain, got %s", entries[0].messageID)
+	}
+}
+
+func TestHandleMessage_SpamBan(t *testing.T) {
+	cache := newMessageCache(5*time.Second, 100)
+	spamCache := newSpamCache(5 * time.Second)
+	userID := "user123"
+	guildID := "guild123"
+	content := "duplicate spam"
+
+	// Seed 2 messages in 2 channels
+	spamCache.add(userID, "msg1", "ch1", content)
+	spamCache.add(userID, "msg2", "ch2", content)
+
+	mock := &mockSession{}
+
+	// Third message in third channel triggers ban
+	trigger := &discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ID:        "msg3",
+			ChannelID: "ch3",
+			GuildID:   guildID,
+			Content:   content,
+			Author: &discordgo.User{
+				ID:       userID,
+				Username: "testuser",
+				Bot:      false,
+			},
+		},
+	}
+
+	handleMessage(mock, "honeypot", cache, spamCache, trigger)
+
+	if mock.bannedUserID != userID {
+		t.Fatalf("expected user %s to be banned for spam, got %s", userID, mock.bannedUserID)
+	}
+
+	// Should delete the 3 spam messages
+	if len(mock.deletedMsgs) != 3 {
+		t.Fatalf("expected 3 deleted messages, got %d: %+v", len(mock.deletedMsgs), mock.deletedMsgs)
+	}
+}
+
+func TestHandleMessage_BotIgnored(t *testing.T) {
+	cache := newMessageCache(5*time.Second, 100)
+	spamCache := newSpamCache(5 * time.Second)
+	botID := "bot123"
+	content := "bot spam"
+
+	spamCache.add(botID, "msg1", "ch1", content)
+	spamCache.add(botID, "msg2", "ch2", content)
+	spamCache.add(botID, "msg3", "ch3", content)
+
+	mock := &mockSession{}
+
+	trigger := &discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ID:        "msg4",
+			ChannelID: "ch4",
+			Content:   content,
+			Author: &discordgo.User{
+				ID:       botID,
+				Username: "testbot",
+				Bot:      true,
+			},
+		},
+	}
+
+	handleMessage(mock, "honeypot", cache, spamCache, trigger)
+
+	if mock.bannedUserID != "" {
+		t.Fatalf("expected bot not banned, got %s", mock.bannedUserID)
+	}
+	if len(mock.deletedMsgs) != 0 {
+		t.Fatalf("expected 0 deleted messages for bot, got %d", len(mock.deletedMsgs))
+	}
+}
+
+func TestHandleMessage_BanFailure(t *testing.T) {
+	cache := newMessageCache(5*time.Second, 100)
+	spamCache := newSpamCache(5 * time.Second)
+	userID := "user123"
+	content := "fail test"
+
+	spamCache.add(userID, "msg1", "ch1", content)
+	spamCache.add(userID, "msg2", "ch2", content)
+
+	mock := &mockSession{banErr: errors.New("api failure")}
+
+	trigger := &discordgo.MessageCreate{
+		Message: &discordgo.Message{
+			ID:        "msg3",
+			ChannelID: "ch3",
+			Content:   content,
+			Author: &discordgo.User{
+				ID:       userID,
+				Username: "testuser",
+				Bot:      false,
+			},
+		},
+	}
+
+	handleMessage(mock, "honeypot", cache, spamCache, trigger)
+
+	if mock.bannedUserID != userID {
+		t.Fatalf("expected ban attempt for user %s", userID)
+	}
+	if len(mock.deletedMsgs) != 0 {
+		t.Fatalf("expected 0 deleted messages when ban fails, got %d", len(mock.deletedMsgs))
 	}
 }

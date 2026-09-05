@@ -363,7 +363,7 @@ func main() {
 	}
 	defer dg.Close()
 
-	log.Printf("ban-bot connected. monitoring honeypot channel %s (cache_ttl=%s)", honeypotID, ttl)
+	log.Printf("ban-bot connected. monitoring honeypot channel %s and cross-channel spam (cache_ttl=%s)", honeypotID, ttl)
 
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)

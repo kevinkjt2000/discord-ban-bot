@@ -1,10 +1,11 @@
 # ban-bot
 
-A lightweight Discord bot that automatically bans users who post messages in a designated honeypot channel and purges their recent messages across the server.
+A lightweight Discord bot that automatically bans users who post messages in a designated honeypot channel, or spam the same message across 3+ channels, and purges their recent messages across the server.
 
 ## Features
 
 - 🍯 Monitors a honeypot channel for non-bot messages
+- 📢 Detects duplicate messages sent to 3+ channels within the cache TTL
 - 🔨 Automatically bans offending users
 - 🧹 Purges cached messages from banned users across all channels
 - ⚡ Minimal resource usage (~100MB RAM)
@@ -95,3 +96,5 @@ sudo systemctl stop ban-bot
 ## Why This Bot?
 
 Some Discord servers use a hidden or restricted channel as a honeypot to catch spam bots and self-promoters who scrape invite links or crawl server channels. When a user posts in the honeypot, this bot immediately bans them and cleans up their other messages.
+
+The bot also hashes message content to detect users sending the exact same message to 3 or more channels within the cache TTL window, and applies the same ban and purge to them.

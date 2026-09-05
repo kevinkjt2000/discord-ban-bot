@@ -21,13 +21,19 @@ mkdir -p "${APP_DIR}"
 chown root:"${APP_USER}" "${APP_DIR}"
 chmod 750 "${APP_DIR}"
 
-# Step 3: copy binary
+# Step 3: stop service if running so binary isn't locked
+if systemctl is-active --quiet ban-bot; then
+	echo "Stopping ban-bot service"
+	systemctl stop ban-bot
+fi
+
+# Step 4: copy binary
 echo "Installing binary: ${APP_DIR}/${BINARY}"
 cp "${BINARY}" "${APP_DIR}/${BINARY}"
 chown root:root "${APP_DIR}/${BINARY}"
 chmod 755 "${APP_DIR}/${BINARY}"
 
-# Step 4: copy env file only if missing, stripping 'export ' prefix for systemd
+# Step 5: copy env file only if missing, stripping 'export ' prefix for systemd
 if [[ ! -f "${ENV_FILE}" ]]; then
 	echo "Creating env file from .envrc: ${ENV_FILE}"
 	if [[ -f ".envrc" ]]; then
@@ -42,7 +48,7 @@ else
 	echo "Env file already exists, skipping: ${ENV_FILE}"
 fi
 
-# Step 5: install systemd service
+# Step 6: install systemd service
 echo "Installing systemd service: ${SYSTEMD_SERVICE}"
 cat > "${SYSTEMD_SERVICE}" <<EOF
 [Unit]
@@ -70,7 +76,7 @@ ReadWritePaths=
 WantedBy=multi-user.target
 EOF
 
-# Step 6: reload and enable
+# Step 7: reload and enable
 systemctl daemon-reload
 if systemctl is-active --quiet ban-bot; then
 	echo "Restarting ban-bot"
